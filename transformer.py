@@ -15,6 +15,7 @@ class Transformer(nn.Module):
             d_model=embed_dim,
             nhead=num_heads,
             dim_feedforward=2048,
+            dropout=0.1,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -22,25 +23,18 @@ class Transformer(nn.Module):
         self.ln = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, x):
+    def forward(self, x):        
         batch_size, seq_len = x.shape
         pos_ids = torch.arange(seq_len, device=x.device).unsqueeze(0).expand(batch_size, -1)
         x = self.token_emb(x) + self.pos_emb(pos_ids)
-        x = self.transformer(x)
+
+        # causal mask (prevent attention to future positions)
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+        x = self.transformer(x, mask=mask)
+
         x = self.ln(x)
         logits = self.head(x)
         return logits
-
-
-def train(x, y, model, optimizer, criterion, epochs=5):
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits.reshape(-1, model.vocab_size), y.reshape(-1))
-        loss.backward()
-        optimizer.step()
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
-
 
 def generate(model, start_seq, max_new_tokens=50, temperature=1.0):
     model.eval()

@@ -23,7 +23,7 @@ class SoundStream(nn.Module):
             dim=D,
             kmeans_init=True,
             kmeans_iters=100,
-            threshold_ema_dead_code=2
+            threshold_ema_dead_code=2,
         )
         self.decoder = Decoder(C=C, D=D, strides=strides)
 
@@ -44,8 +44,10 @@ class SoundStream(nn.Module):
         
         if mode == 'encode':
             e = self.encoder(x)
-            quantized, _, _ = self.quantizer(e.permute((0,2,1)))
-            return quantized
+            # quantized, _, _ = self.quantizer(e.permute((0,2,1)))
+            quantized, indicies, _ = self.quantizer(e.permute((0,2,1)))
+
+            return indicies
         
         if mode == 'decode':
             o = self.decoder(x.permute((0,2,1)))
