@@ -5,13 +5,26 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import soundfile as sf
-
 from soundstream import from_pretrained
-from transformer import Transformer, train, generate
+from transformer import Transformer
+from torch.utils.data import random_split
+import wandb
 
-# ==========================================
-# 1. Dataset Class — handles all .wav files
-# ==========================================
+
+
+wandb.init(
+    project="idl-final",         
+    name="baseline-soundstream", 
+    config={
+        "learning_rate": 3e-4,
+        "epochs": 5,
+        "batch_size": 1,
+        "optimizer": "Adam",
+        "loss_fn": "CrossEntropy",
+    }
+)
+
+# Dataloader
 class AudioTokenDataset(Dataset):
     def __init__(self, root_dir, sound_stream):
         self.wav_files = glob.glob(os.path.join(root_dir, "**/*.wav"), recursive=True)
@@ -40,34 +53,61 @@ class AudioTokenDataset(Dataset):
         return x, y
 
 
-# ==========================================
-# 2. Training Loop for Full Dataset
-# ==========================================
-def train_on_dataset(model, loader, optimizer, criterion, epochs=5, device="cpu"):
+# Training and Validation Loop
+def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epochs=5, device="cpu"):
     model.to(device)
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0.0
 
-        for batch_idx, (x, y) in enumerate(loader):
+    # Track losses
+    train_losses = []
+    val_losses = []
+
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        total_train_loss = 0.0
+
+        for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             logits = model(x)
             loss = criterion(logits.reshape(-1, model.vocab_size), y.reshape(-1))
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
+            total_train_loss += loss.item()
 
-            if (batch_idx + 1) % 5 == 0:
-                print(f"  Batch {batch_idx+1}/{len(loader)} | Loss: {loss.item():.4f}")
+            if (batch_idx + 1) % 100 == 0:
+                print(f"  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
-        avg_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1}/{epochs} | Average Loss: {avg_loss:.4f}")
+        avg_train_loss = total_train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+
+        # Validation
+        model.eval()
+        total_val_loss = 0.0
+        with torch.no_grad():
+            for x, y in val_loader:
+                x, y = x.to(device), y.to(device)
+                logits = model(x)
+                loss = criterion(logits.reshape(-1, model.vocab_size), y.reshape(-1))
+                total_val_loss += loss.item()
+
+        avg_val_loss = total_val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+
+        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+
+        wandb.log({
+            "train_loss": avg_train_loss,
+            "val_loss": avg_val_loss,
+            "epoch": epoch + 1
+        })
+
+    
+    return train_losses, val_losses
+    
 
 
-# ==========================================
-# 3. Main Script
-# ==========================================
+
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -82,40 +122,31 @@ if __name__ == "__main__":
     dataset = AudioTokenDataset(data_dir, sound_stream)
     print(f"Found {len(dataset)} .wav files in {data_dir}")
     print("Example files:", dataset.wav_files[:5])
-    loader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-    print(f"Loaded {len(dataset)} audio files for training")
+    # 80 20 training split
+    train_size = int(0.80 * len(dataset))
+    val_size = len(dataset) - train_size
+
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    print(f"Loaded {len(train_dataset)} audio files for training")
+    print(f"Loaded {len(val_dataset)} audio files for validation")
 
     # Model setup
-    vocab_size = 1024
-    model = Transformer(vocab_size)
+    model = Transformer()
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
     criterion = nn.CrossEntropyLoss()
 
     # Train Transformer
     print("Training Transformer model on dataset")
-    train_on_dataset(model, loader, optimizer, criterion, epochs=5, device=device)
+    train_losses, val_losses = train_on_dataset(
+    model, train_loader, val_loader, optimizer, criterion, epochs=5, device=device)
     torch.save(model.state_dict(), "transformer.pth")
+    wandb.save("transformer.pth")
     print("Model saved as transformer.pth")
 
-    # # ==============================
-    # # 4. Generation (test on one file)
-    # # ==============================
-    # print("\nGenerating new audio sample...")
-
-    # # Load one example file to use as a prompt
-    # test_file = glob.glob(os.path.join(data_dir, "**/*.wav"), recursive=True)[0]
-    # waveform, sr = sf.read(test_file)
-    # waveform = torch.tensor(waveform).unsqueeze(0).unsqueeze(0).float()
-    # quantized, indices = sound_stream(waveform, mode="encode")
-    # tokens = indices[:, :, 0].long()
-
-    # start_seq = tokens[:, :100]
-    # pred_tokens = generate(model, start_seq, max_new_tokens=200, temperature=0.8)
-
-    # pred_expanded = pred_tokens.unsqueeze(-1).expand(-1, -1, quantized.shape[-1])
-    # recovered = sound_stream(pred_expanded.float(), mode="decode")
-
-    # import torchaudio
-    # torchaudio.save("out.wav", recovered.squeeze().cpu(), 16000)
-    # print("Generated audio saved as out.wav")
+    torch.save(train_losses, "train_losses.pt")
+    torch.save(val_losses, "val_losses.pt")
+    print("Losses saved in train_losses.pt and val_losses.pt")
