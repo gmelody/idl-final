@@ -113,7 +113,7 @@ if __name__ == "__main__":
     print("Using device:", device)
 
     # Path to WAV
-    data_dir = "maestro-v3.0.0"
+    data_dir = "maestro-v3.0.0/2018"
 
     print("Loading SoundStream model...")
     sound_stream = from_pretrained()
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     # Train Transformer
     print("Training Transformer model on dataset")
     train_losses, val_losses = train_on_dataset(
-    model, train_loader, val_loader, optimizer, criterion, epochs=5, device=device)
+    model, train_loader, val_loader, optimizer, criterion, epochs=8, device=device)
     torch.save(model.state_dict(), "transformer.pth")
     wandb.save("transformer.pth")
     print("Model saved as transformer.pth")

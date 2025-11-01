@@ -15,7 +15,7 @@ class Transformer(nn.Module):
         dropout (float): Dropout probability.
         max_seq_len (int): Maximum sequence length.
     """
-    def __init__(self, vocab_size=1024, embed_dim=512, num_heads=8, num_layers=6, ff_dim=2048, dropout=0.1, max_seq_len=20000):
+    def __init__(self, vocab_size=1024, embed_dim=512, num_heads=8, num_layers=6, ff_dim=2048, dropout=0.1, max_seq_len=2048):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
