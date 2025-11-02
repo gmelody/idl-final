@@ -19,9 +19,9 @@ class Transformer(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
-
+        self.max_seq_len = max_seq_len
         self.token_emb = nn.Embedding(vocab_size, embed_dim)
-        self.pos_emb = nn.Embedding(max_seq_len, embed_dim)
+        self.pos_emb = nn.Embedding(self.max_seq_len, embed_dim)
         self.dropout = nn.Dropout(dropout)
 
         encoder_layer = nn.TransformerEncoderLayer(

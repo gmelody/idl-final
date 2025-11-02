@@ -18,7 +18,7 @@ wandb.init(
     config={
         "learning_rate": 3e-4,
         "epochs": 5,
-        "batch_size": 1,
+        "batch_size": 8,
         "optimizer": "Adam",
         "loss_fn": "CrossEntropy",
     }
@@ -26,30 +26,55 @@ wandb.init(
 
 # Dataloader
 class AudioTokenDataset(Dataset):
-    def __init__(self, root_dir, sound_stream):
+    def __init__(self, root_dir, sound_stream, max_length, device, overlap=0.5):
+        self.sound_stream = sound_stream
+        self.device = device
+        self.max_length = max_length
+        self.overlap = overlap
+
+        self.items = []  # list of (wav_path, start_idx)
+
         self.wav_files = glob.glob(os.path.join(root_dir, "**/*.wav"), recursive=True)
         self.wav_files += glob.glob(os.path.join(root_dir, "**/*.WAV"), recursive=True)
-        self.sound_stream = sound_stream
+
+        print(f"Found {len(self.wav_files)} wav files. Pre-indexing windows...")
+
+        for path in self.wav_files:
+            waveform, sr = sf.read(path)
+            if len(waveform.shape) > 1:
+                waveform = waveform.mean(axis=1)
+
+            waveform = torch.tensor(waveform).unsqueeze(0).unsqueeze(0).float().to(device)
+            with torch.no_grad():
+                indices = sound_stream(waveform, mode="encode")  # (1, T, Q)
+
+            tokens = indices[:, :, 0].long().squeeze(0)  # (T,)
+            total_tokens = len(tokens)
+            step = int(max_length * (1 - overlap))
+
+            for start in range(0, total_tokens - max_length - 1, step):
+                self.items.append((path, start))
+
+        print(f"Dataset contains {len(self.items)} training windows (~{len(self.items)/len(self.wav_files):.1f} per file)")
 
     def __len__(self):
-        return len(self.wav_files)
+      return len(self.items)
 
     def __getitem__(self, idx):
-        path = self.wav_files[idx]
-        # print(f"Encoding file {idx+1}/{len(self.wav_files)}: {os.path.basename(path)}", flush=True)
+        path, start = self.items[idx]
         waveform, sr = sf.read(path)
-
-        # Convert stereo to mono if necessary
         if len(waveform.shape) > 1:
             waveform = waveform.mean(axis=1)
 
-        # Shape = (1, 1, n_samples)
-        waveform = torch.tensor(waveform).unsqueeze(0).unsqueeze(0).float()
+        waveform = torch.tensor(waveform).unsqueeze(0).unsqueeze(0).float().to(self.device)
+        with torch.no_grad():
+            indices = self.sound_stream(waveform, mode="encode")
 
-        quantized, indices = self.sound_stream(waveform, mode="encode")
         tokens = indices[:, :, 0].long().squeeze(0)
-        x = tokens[:-1]
-        y = tokens[1:]
+        window = tokens[start:start + self.max_length + 1]
+
+        x = window[:-1]
+        y = window[1:]
         return x, y
 
 
@@ -72,6 +97,7 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
             logits = model(x)
             loss = criterion(logits.reshape(-1, model.vocab_size), y.reshape(-1))
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_train_loss += loss.item()
 
@@ -115,11 +141,20 @@ if __name__ == "__main__":
     # Path to WAV
     data_dir = "maestro-v3.0.0/2018"
 
+    # Model setup
+    model = Transformer()
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    criterion = nn.CrossEntropyLoss()
+
     print("Loading SoundStream model...")
     sound_stream = from_pretrained()
+    sound_stream.to(device)
+    sound_stream.eval()
+    for param in sound_stream.parameters():
+        param.requires_grad = False
 
     # Build dataset + loader
-    dataset = AudioTokenDataset(data_dir, sound_stream)
+    dataset = AudioTokenDataset(data_dir, sound_stream, model.max_seq_len, device = device)
     print(f"Found {len(dataset)} .wav files in {data_dir}")
     print("Example files:", dataset.wav_files[:5])
 
@@ -129,15 +164,11 @@ if __name__ == "__main__":
 
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
     print(f"Loaded {len(train_dataset)} audio files for training")
     print(f"Loaded {len(val_dataset)} audio files for validation")
 
-    # Model setup
-    model = Transformer()
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
-    criterion = nn.CrossEntropyLoss()
 
     # Train Transformer
     print("Training Transformer model on dataset")
