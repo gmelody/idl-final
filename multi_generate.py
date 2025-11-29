@@ -49,24 +49,12 @@ def sample_sequence(model, seed_seq, max_new_tokens=500, temperature=1.0):
 def decode_tokens(tokens, sound_stream):
     with torch.no_grad():
         print("TOKEN SHAPE: ", tokens.shape)
-        tokens = tokens.to(DEVICE).unsqueeze(0)  # [1, T]
-        quantizer = sound_stream.quantizer
-
-        # Get full codebook and number of quantizers
-        num_quantizers, codebook_size, D = quantizer.codebooks.size()
-
-        # Use first codebook to get embeddings
-        embeddings_level_0 = quantizer.codebooks[0][tokens]  # [1, T, D]
-
-        # Pad missing quantizers with zeros (assumes silent or 0-contribution)
-        # embeddings = embeddings_level_0
-        for _ in range(1, num_quantizers):
-            zero_embeddings = torch.zeros_like(embeddings_level_0)
-            embeddings = embeddings + zero_embeddings  # Sum as residuals are additive
+        tokens = tokens.to(DEVICE).unsqueeze(0)  # [1, T, Q]
+        # quantizer = sound_stream.quantizer
 
         # Decode embeddings
-        decoded_audio = sound_stream.decoder(embeddings.permute(0, 2, 1))  # [1, D, T]
-    
+        decoded_audio = sound_stream.decoder(tokens.permute(0, 2, 1))  # [1, D, T]
+
     return decoded_audio.squeeze().cpu()
 
 if __name__ == "__main__":

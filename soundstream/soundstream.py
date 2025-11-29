@@ -46,9 +46,17 @@ class SoundStream(nn.Module):
             e = self.encoder(x)
             # quantized, _, _ = self.quantizer(e.permute((0,2,1)))
             quantized, indicies, _ = self.quantizer(e.permute((0,2,1)))
-
+            # print(quantized, indicies)
             return indicies
         
         if mode == 'decode':
-            o = self.decoder(x.permute((0,2,1)))
+            # assume i am given indicies
+            quantized_latents = self.quantizer.get_codes_from_indices(x)
+            print(quantized_latents.shape)
+
+            full_latent = quantized_latents.sum(dim=0)  
+
+            print(full_latent.shape)
+            o = self.decoder(full_latent.permute((0,2,1)))
             return o
+        
