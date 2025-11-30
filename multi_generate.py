@@ -3,95 +3,129 @@ import random
 import soundfile as sf
 from pathlib import Path
 from soundstream import from_pretrained as load_soundstream
-from transformer import Transformer  
+from multi_transformer import MultiQuantizerTransformer    # ← your 4-token transformer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_model(model_path, vocab_size=1024, seq_len=2048):
-    model = Transformer(
-        vocab_size=vocab_size,
+
+# -----------------------------
+# Load trained transformer
+# -----------------------------
+def load_model(model_path, vocab_size=1024, num_q=4, seq_len=2048):
+    model = MultiQuantizerTransformer(
+        num_quantizers = num_q,
+        codebook_size = vocab_size,
         embed_dim=512,
         num_heads=8,
         num_layers=6,
         ff_dim=2048,
         dropout=0.1,
-        max_seq_len=seq_len
+        max_seq_len=2048
     )
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model.eval().to(DEVICE)
     return model
 
+
+# -----------------------------
+# Sampling for multi-token prediction
+# -----------------------------
 def sample_sequence(model, seed_seq, max_new_tokens=500, temperature=1.0):
     model.eval()
-    vocab_size = model.vocab_size
-    max_seq_len = model.max_seq_len  # Add this to your Transformer if not present
 
-    # Clamp the seed sequence to ensure all indices are valid
-    context = torch.clamp(seed_seq.clone().to(DEVICE), min=0, max=vocab_size - 1)
+    num_q = seed_seq.shape[1]      # = 4
+    vocab_size = model.vocab_size
+    max_len = model.max_seq_len    # 2048
+
+    # Ensure seed indices are in valid integer range
+    context = torch.clamp(seed_seq.clone().to(DEVICE), 0, vocab_size - 1)
 
     for _ in range(max_new_tokens):
-        with torch.no_grad():
-            # Roll context if too long (keep last window of max_seq_len)
-            if context.size(0) > max_seq_len:
-                context = context[-max_seq_len:]
 
-            logits = model(context.unsqueeze(0))[:, -1, :] / temperature
-            probs = torch.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+        # Keep the last max_len frames (sliding window)
+        if context.shape[0] > max_len:
+            context = context[-max_len:]
 
-            # Clamp next token to valid range
-            next_token = torch.clamp(next_token, min=0, max=vocab_size - 1)
+        # Model expects [B, T, 4]
+        logits = model(context.unsqueeze(0))  # → [1, T, 4, vocab]
+        logits_last = logits[:, -1] / temperature  # → [1, 4, vocab]
 
-            context = torch.cat([context, next_token.squeeze(0)], dim=0)
+        next_tokens = []
+        for q in range(num_q):
+            probs = torch.softmax(logits_last[0, q], dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).item()
+            next_tokens.append(next_token)
 
-    return context
+        next_tokens = torch.tensor(next_tokens, device=DEVICE).unsqueeze(0)  # [1, 4]
 
-def decode_tokens(tokens, sound_stream):
-    with torch.no_grad():
-        print("TOKEN SHAPE: ", tokens.shape)
-        tokens = tokens.to(DEVICE).unsqueeze(0)  # [1, T, Q]
-        # quantizer = sound_stream.quantizer
+        # Append new [4] token row
+        context = torch.cat([context, next_tokens], dim=0)
 
-        # Decode embeddings
-        decoded_audio = sound_stream.decoder(tokens.permute(0, 2, 1))  # [1, D, T]
+    return context  # [T + new, 4]
 
-    return decoded_audio.squeeze().cpu()
 
+# -----------------------------
+# Decoder: tokens → embeddings → waveform
+# -----------------------------
+def decode_tokens(tokens_4q, sound_stream):
+    """
+    tokens_4q: [T, 4]   integers for the first 4 quantizers
+    SoundStream expects 16 codebooks, so we zero-pad remaining 12.
+    """
+
+    tokens_4q = tokens_4q.to(DEVICE)     # [T, 4]
+    T = tokens_4q.shape[0]
+
+    # Build full indices: [1, T, 16]
+    full_indices = torch.zeros(1, T, 16, dtype=torch.long, device=DEVICE)
+    full_indices[:, :, :4] = tokens_4q  # put ours in the first 4
+
+    # Convert token indices → embeddings
+    quantized_embeddings, _, _ = sound_stream.quantizer.from_codes(full_indices)
+    # shape: [1, T, D]
+
+    # Decoder expects [batch, D, T]
+    decoded = sound_stream.decoder(quantized_embeddings.permute(0, 2, 1))
+
+    return decoded.squeeze(0).cpu()   # [audio_len]
+
+
+# -----------------------------
+# MAIN SCRIPT
+# -----------------------------
 if __name__ == "__main__":
     print("Loading model and SoundStream...")
-    transformer = load_model("transformer.pth")
 
+    transformer = load_model("transformer.pth")   # <-- your new 4q trained model
     sound_stream = load_soundstream().to(DEVICE)
     sound_stream.eval()
 
-    # Load dataset
-    dataset_folder = Path("2018_processed")
+    # Load a random seed window from your 4-level dataset
+    dataset_folder = Path("2018_processed_four_levels")
     pt_files = list(dataset_folder.glob("*.pt"))
-    selected_file = random.choice(pt_files)
-    pt_data = torch.load(selected_file)
-    seed_window = random.choice(pt_data['windows'])['x']
+    selected_pt = random.choice(pt_files)
+    pt_data = torch.load(selected_pt)
 
-    print(f"Generating continuation from '{pt_data['name']}'")
+    seed_window = random.choice(pt_data["windows"])["x"]  # [L, 4]
 
+    print(f"Generating continuation starting from {pt_data['name']}")
 
-    # Generate continuation
-    full_sequence = sample_sequence(
-        model=transformer,
+    # Generate new continuation
+    full_tokens = sample_sequence(
+        transformer,
         seed_seq=seed_window,
         max_new_tokens=500,
-        temperature=1.2
+        temperature=1.1
     )
 
-    print("Decoding audio from tokens")
-    decoded_audio = decode_tokens(full_sequence, sound_stream)
-    output_path = "generated_continuation.wav"
-    # Convert tensor to NumPy array
-    audio_np = decoded_audio.cpu().numpy()
+    print("Decoding audio...")
+    audio = decode_tokens(full_tokens, sound_stream)
 
-    # If your waveform is 1D, reshape it to (N, 1) for sf
+    # Save WAV
+    audio_np = audio.numpy()
     if audio_np.ndim == 1:
-        audio_np = audio_np.reshape(-1, 1)
+        audio_np = audio_np[:, None]
 
-    # Save using soundfile
+    output_path = "generated_4quantizer.wav"
     sf.write(output_path, audio_np, samplerate=24000)
-    print(f"Saved generated continuation to '{output_path}'")    
+    print(f"Saved generated audio to: {output_path}")

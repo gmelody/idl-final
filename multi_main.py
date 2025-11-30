@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import soundfile as sf
-from transformer import Transformer
+from multi_transformer import MultiQuantizerTransformer
 from torch.utils.data import random_split
 import wandb
 
@@ -50,23 +50,35 @@ class PreprocessedTokenDataset(Dataset):
 def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epochs, device="cpu"):
     model.to(device)
 
-    # Track losses
     train_losses = []
     val_losses = []
 
     for epoch in range(epochs):
-        # Training
         model.train()
-        total_train_loss = 0.0
+        total_train_loss = 0
 
         for batch_idx, (x, y) in enumerate(train_loader):
-            x, y = x.to(device), y.to(device)
+            x = x.to(device)             # [B, T]
+            y = y.to(device)             # [B, T, Q]
+
             optimizer.zero_grad()
-            logits = model(x)
-            loss = criterion(logits.reshape(-1, model.vocab_size), y.reshape(-1))
+            logits = model(x)            # [B, T, Q, vocab]
+            
+            B, T, Q, V = logits.shape
+
+            loss = 0
+            for q in range(Q):
+                loss_q = criterion(
+                    logits[:,:,q,:].reshape(-1, V),
+                    y[:,:,q].reshape(-1)
+                )
+                loss += loss_q
+            loss /= Q  # avg quantizers
+
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+
             total_train_loss += loss.item()
 
             if (batch_idx + 1) % 100 == 0:
@@ -77,12 +89,22 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
 
         # Validation
         model.eval()
-        total_val_loss = 0.0
+        total_val_loss = 0
         with torch.no_grad():
             for x, y in val_loader:
-                x, y = x.to(device), y.to(device)
+                x = x.to(device)
+                y = y.to(device)
                 logits = model(x)
-                loss = criterion(logits.reshape(-1, model.vocab_size), y.reshape(-1))
+
+                B, T, Q, V = logits.shape
+                loss = 0
+                for q in range(Q):
+                    loss_q = criterion(
+                        logits[:,:,q,:].reshape(-1, V),
+                        y[:,:,q].reshape(-1)
+                    )
+                    loss += loss_q
+                loss /= Q
                 total_val_loss += loss.item()
 
         avg_val_loss = total_val_loss / len(val_loader)
@@ -93,10 +115,9 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
         wandb.log({
             "train_loss": avg_train_loss,
             "val_loss": avg_val_loss,
-            "epoch": epoch + 1
+            "epoch": epoch+1
         })
 
-    
     return train_losses, val_losses
     
 
@@ -107,10 +128,10 @@ if __name__ == "__main__":
     print("Using device:", device)
 
     # Path to WAV
-    data_dir = "2018_processed"  # Directory with .pt files
+    data_dir = "2018_processed_four_levels"  # Directory with .pt files
 
     # Model setup
-    model = Transformer()
+    model = MultiQuantizerTransformer()
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
     criterion = nn.CrossEntropyLoss().to(device)
 

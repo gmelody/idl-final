@@ -11,8 +11,8 @@ class MultiQuantizerTransformer(nn.Module):
 
     def __init__(
         self,
-        num_quantizers,
-        codebook_size,
+        num_quantizers = 4,
+        codebook_size = 1024,
         embed_dim=512,
         num_heads=8,
         num_layers=6,
@@ -51,16 +51,12 @@ class MultiQuantizerTransformer(nn.Module):
 
     def forward(self, x):
         """
-        x shape: [batch, seq_len, num_quantizers]
+        x shape: [batch, seq_len]  # coarse (quantizer 0) sequence
         """
 
-        B, T, Q = x.shape
-        assert Q == self.num_quantizers
+        B, T = x.shape
 
-        # Embed each quantizer token and sum them (common trick)
-        # token_emb(x) -> [B, T, Q, D]
         x = self.token_emb(x)
-        x = x.sum(dim=2)  # [B, T, D]
 
         # Add positional encoding
         pos = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
@@ -78,32 +74,3 @@ class MultiQuantizerTransformer(nn.Module):
         logits = logits.view(B, T, self.num_quantizers, self.codebook_size)
 
         return logits
-
-@torch.no_grad()
-def generate(model, start_tokens, max_new_tokens=50, temperature=1.0):
-    """
-    start_tokens: [B, T0, Q]
-    returns: [B, T0 + max_new_tokens, Q]
-    """
-
-    model.eval()
-    seq = start_tokens.clone()  # [B, T0, Q]
-    B, _, Q = seq.shape
-
-    for _ in range(max_new_tokens):
-        logits = model(seq)              # [B, T, Q, V]
-        logits_last = logits[:, -1]      # [B, Q, V]
-
-        # temperature scaling
-        logits_last = logits_last / temperature
-
-        # softmax per quantizer
-        probs = F.softmax(logits_last, dim=-1).view(B * Q, model.codebook_size)
-
-        # sample per quantizer independently
-        next_tokens = torch.multinomial(probs, 1).view(B, Q)  # [B, Q]
-
-        # append to sequence
-        seq = torch.cat([seq, next_tokens.unsqueeze(1)], dim=1)
-
-    return seq
