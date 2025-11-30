@@ -35,6 +35,8 @@ class MultiQuantizerTransformer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        self.quant_mixer = nn.Linear(num_quantizers * embed_dim, embed_dim)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
@@ -51,32 +53,34 @@ class MultiQuantizerTransformer(nn.Module):
 
     def forward(self, x):
         """
-        x shape: [batch, seq_len, num_quantizers]  
+        x shape: [batch, seq_len, num_quantizers]
         """
 
         B, T, Q = x.shape
         assert Q == self.num_quantizers
 
-        # Embed each quantizer token: → [B, T, Q, embed_dim]
+        # Embed each quantizer token → [B, T, Q, E]
         tok = self.token_emb(x)
 
-        # Reduce quantizer dimension → [B, T, embed_dim]
-        # (sum, mean, or learned projection)
-        x = tok.mean(dim=2)
+        # Flatten quantizer dimension → [B, T, Q*E]
+        tok = tok.reshape(B, T, Q * self.embed_dim)
 
-        # Add positional encodings
+        # Project combined quantizer embeddings → [B, T, E]
+        x = self.quant_mixer(tok)
+
+        # Positional embeddings
         pos = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
         x = x + self.pos_emb(pos)
         x = self.dropout(x)
 
-        # Causal attention mask
+        # Causal mask
         mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
 
-        # Transformer
+        # Transformer encoder
         x = self.transformer(x, mask=mask)
         x = self.ln(x)
 
-        # Predict logits: [B, T, Q*V] → reshape → [B, T, Q, V]
+        # Final prediction head
         logits = self.head(x)
         logits = logits.view(B, T, self.num_quantizers, self.codebook_size)
 
