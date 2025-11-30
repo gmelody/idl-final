@@ -48,7 +48,6 @@ class PreprocessedTokenDataset(Dataset):
 
 # Training and Validation Loop
 def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epochs, device="cpu"):
-    model.to(device)
 
     train_losses = []
     val_losses = []
@@ -58,22 +57,19 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
         total_train_loss = 0
 
         for batch_idx, (x, y) in enumerate(train_loader):
-            x = x.to(device)             # [B, T]
-            y = y.to(device)             # [B, T, Q]
+            x = x.long().to(device)   # [B, T, Q]
+            y = y.long().to(device)   # [B, T, Q]
 
             optimizer.zero_grad()
             logits = model(x)            # [B, T, Q, vocab]
             
             B, T, Q, V = logits.shape
 
-            loss = 0
-            for q in range(Q):
-                loss_q = criterion(
-                    logits[:,:,q,:].reshape(-1, V),
-                    y[:,:,q].reshape(-1)
-                )
-                loss += loss_q
-            loss /= Q  # avg quantizers
+            logits = logits.permute(0,1,3,2)   # [B, T, V, Q]
+            logits = logits.reshape(-1, V, Q)  # collapse batch/time but preserve Q
+            y = y.reshape(-1, Q)
+
+            loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -92,19 +88,17 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
         total_val_loss = 0
         with torch.no_grad():
             for x, y in val_loader:
-                x = x.to(device)
-                y = y.to(device)
+                x = x.long().to(device)
+                y = y.long().to(device)
                 logits = model(x)
 
                 B, T, Q, V = logits.shape
-                loss = 0
-                for q in range(Q):
-                    loss_q = criterion(
-                        logits[:,:,q,:].reshape(-1, V),
-                        y[:,:,q].reshape(-1)
-                    )
-                    loss += loss_q
-                loss /= Q
+                logits = logits.permute(0,1,3,2)   # [B, T, V, Q]
+                logits = logits.reshape(-1, V, Q)  # collapse batch/time but preserve Q
+                y = y.reshape(-1, Q)
+
+                loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
+
                 total_val_loss += loss.item()
 
         avg_val_loss = total_val_loss / len(val_loader)
@@ -131,7 +125,7 @@ if __name__ == "__main__":
     data_dir = "2018_processed_four_levels"  # Directory with .pt files
 
     # Model setup
-    model = MultiQuantizerTransformer()
+    model = MultiQuantizerTransformer().to(device)
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
     criterion = nn.CrossEntropyLoss().to(device)
 

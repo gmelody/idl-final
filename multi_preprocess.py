@@ -65,9 +65,11 @@ def preprocess_wavs(
 
             with torch.no_grad():
                 indices = sound_stream(chunk, mode="encode")   # [1, T_down, 16]
+            print("  Encoded chunk shape (full):", indices.shape)
 
             # Slice top X quantizers
             indices = indices[:, :, :num_quantizers_to_use]    # [1, T_down, X]
+            print("  Sliced chunk shape:", indices.shape)
             all_tokens.append(indices.cpu())
 
         if len(all_tokens) == 0:
@@ -75,6 +77,7 @@ def preprocess_wavs(
             continue
 
         tokens = torch.cat(all_tokens, dim=1).squeeze(0)  # [T_total, X]
+        print("  Tokens shape:", tokens.shape)
         total_frames = tokens.shape[0]
 
         if total_frames <= max_length:
@@ -91,7 +94,9 @@ def preprocess_wavs(
             # x = [L, X] input tokens for all quantizers
             # y = [L, X] next-timestep tokens for all quantizers
             x = window[:-1, :num_quantizers_to_use].clone()   # [L, X]
+            print("  x window shape:", x.shape)
             y = window[1:,  :num_quantizers_to_use].clone()   # [L, X]
+            print("  y window shape:", y.shape)
             windows.append({"x": x, "y": y})
 
         out_file = os.path.join(output_dir, f"{song_name}.pt")

@@ -51,26 +51,33 @@ class MultiQuantizerTransformer(nn.Module):
 
     def forward(self, x):
         """
-        x shape: [batch, seq_len]  # coarse (quantizer 0) sequence
+        x shape: [batch, seq_len, num_quantizers]  
         """
 
-        B, T = x.shape
+        B, T, Q = x.shape
+        assert Q == self.num_quantizers
 
-        x = self.token_emb(x)
+        # Embed each quantizer token: → [B, T, Q, embed_dim]
+        tok = self.token_emb(x)
 
-        # Add positional encoding
+        # Reduce quantizer dimension → [B, T, embed_dim]
+        # (sum, mean, or learned projection)
+        x = tok.mean(dim=2)
+
+        # Add positional encodings
         pos = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
         x = x + self.pos_emb(pos)
         x = self.dropout(x)
 
-        # causal mask
+        # Causal attention mask
         mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
 
+        # Transformer
         x = self.transformer(x, mask=mask)
         x = self.ln(x)
 
-        # Predict logits
-        logits = self.head(x)  # [B, T, Q*V]
+        # Predict logits: [B, T, Q*V] → reshape → [B, T, Q, V]
+        logits = self.head(x)
         logits = logits.view(B, T, self.num_quantizers, self.codebook_size)
 
         return logits
