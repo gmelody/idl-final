@@ -16,7 +16,7 @@ wandb.init(
     name="final-4-quantizers", 
     config={
         "learning_rate": 3e-4,
-        "epochs": 20,
+        "epochs": 25,
         "batch_size": 8,
         "optimizer": "Adam",
         "loss_fn": "CrossEntropy",
@@ -53,69 +53,71 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
     train_losses = []
     val_losses = []
 
-    for epoch in range(epochs):
-        model.train()
-        total_train_loss = 0
+    try:
+        for epoch in range(epochs):
+            model.train()
+            total_train_loss = 0
 
-        for batch_idx, (x, y) in enumerate(train_loader):
-            x = x.long().to(device)   # [B, T, Q]
-            y = y.long().to(device)   # [B, T, Q]
-
-            optimizer.zero_grad()
-            logits = model(x)            # [B, T, Q, vocab]
-            
-            B, T, Q, V = logits.shape
-
-            logits = logits.permute(0,1,3,2)   # [B, T, V, Q]
-            logits = logits.reshape(-1, V, Q)  # collapse batch/time but preserve Q
-            y = y.reshape(-1, Q)
-
-            loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-
-            total_train_loss += loss.item()
-
-            if (batch_idx + 1) % 100 == 0:
-                print(f"  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
-
-        avg_train_loss = total_train_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-
-        # Validation
-        model.eval()
-        total_val_loss = 0
-        with torch.no_grad():
-            for x, y in val_loader:
+            for batch_idx, (x, y) in enumerate(train_loader):
                 x = x.long().to(device)
                 y = y.long().to(device)
+
+                optimizer.zero_grad()
                 logits = model(x)
 
                 B, T, Q, V = logits.shape
-                logits = logits.permute(0,1,3,2)   # [B, T, V, Q]
-                logits = logits.reshape(-1, V, Q)  # collapse batch/time but preserve Q
+                logits = logits.permute(0,1,3,2)
+                logits = logits.reshape(-1, V, Q)
                 y = y.reshape(-1, Q)
 
                 loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
 
-                total_val_loss += loss.item()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
 
-        avg_val_loss = total_val_loss / len(val_loader)
-        val_losses.append(avg_val_loss)
+                total_train_loss += loss.item()
 
-        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+                if (batch_idx + 1) % 100 == 0:
+                    print(f"  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
-        wandb.log({
-            "train_loss": avg_train_loss,
-            "val_loss": avg_val_loss,
-            "epoch": epoch+1
-        })
+            avg_train_loss = total_train_loss / len(train_loader)
+            train_losses.append(avg_train_loss)
 
-    return train_losses, val_losses
+            model.eval()
+            total_val_loss = 0
+            with torch.no_grad():
+                for x, y in val_loader:
+                    x = x.long().to(device)
+                    y = y.long().to(device)
+                    logits = model(x)
+
+                    B, T, Q, V = logits.shape
+                    logits = logits.permute(0,1,3,2)
+                    logits = logits.reshape(-1, V, Q)
+                    y = y.reshape(-1, Q)
+
+                    loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
+                    total_val_loss += loss.item()
+
+            avg_val_loss = total_val_loss / len(val_loader)
+            val_losses.append(avg_val_loss)
+
+            print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+
+            wandb.log({
+                "train_loss": avg_train_loss,
+                "val_loss": avg_val_loss,
+                "epoch": epoch+1
+            })
+
+        return train_losses, val_losses
+
+    except KeyboardInterrupt:
+        print("Interrupted inside training loop — returning partial losses.")
+        return train_losses, val_losses
     
 
 
@@ -154,7 +156,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
     criterion = nn.CrossEntropyLoss().to(device)
 
-    epochs = 40
+    epochs = 25
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=6e-4,
@@ -165,8 +167,22 @@ if __name__ == "__main__":
 
     # Train Transformer
     print("Training Transformer model on dataset")
-    train_losses, val_losses = train_on_dataset(
-        model, train_loader, val_loader, optimizer, criterion, epochs=epochs, device=device, scheduler=scheduler)
+    train_losses = []
+    val_losses = []
+    try:
+        train_losses, val_losses = train_on_dataset(
+            model, train_loader, val_loader, optimizer, criterion, epochs=epochs, device=device, scheduler=scheduler
+        )
+    except KeyboardInterrupt:
+        print("Interrupted — saving partial model and losses...")
+        torch.save(model.state_dict(), "transformer_interrupt.pth")
+        wandb.save("transformer_interrupt.pth")
+        torch.save(train_losses, "train_losses_interrupt.pt")
+        torch.save(val_losses, "val_losses_interrupt.pt")
+        print("Saved interrupt checkpoint.")
+        raise
+
+    # Normal completion
     torch.save(model.state_dict(), "transformer.pth")
     wandb.save("transformer.pth")
     print("Model saved as transformer.pth")
