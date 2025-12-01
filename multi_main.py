@@ -20,6 +20,7 @@ wandb.init(
         "batch_size": 8,
         "optimizer": "Adam",
         "loss_fn": "CrossEntropy",
+        "scheduler": "OneCycleLR",
     }
 )
 
@@ -47,7 +48,7 @@ class PreprocessedTokenDataset(Dataset):
 
 
 # Training and Validation Loop
-def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epochs, device="cpu"):
+def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epochs, device="cpu", scheduler=None):
 
     train_losses = []
     val_losses = []
@@ -74,6 +75,8 @@ def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epoc
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             total_train_loss += loss.item()
 
@@ -126,8 +129,6 @@ if __name__ == "__main__":
 
     # Model setup
     model = MultiQuantizerTransformer().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
-    criterion = nn.CrossEntropyLoss().to(device)
 
     # Build dataset by songs instead of samples
     data_files = glob.glob(os.path.join(data_dir, "*.pt"))
@@ -150,11 +151,22 @@ if __name__ == "__main__":
     print(f"Loaded {len(train_dataset.samples)} windows for training from {len(train_files)} songs")
     print(f"Loaded {len(val_dataset.samples)} windows for validation from {len(val_files)} songs")
 
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    criterion = nn.CrossEntropyLoss().to(device)
+
+    epochs = 40
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=6e-4,
+        steps_per_epoch=len(train_loader),
+        epochs=epochs,
+        pct_start=0.1
+    )
 
     # Train Transformer
     print("Training Transformer model on dataset")
     train_losses, val_losses = train_on_dataset(
-    model, train_loader, val_loader, optimizer, criterion, epochs=20, device=device)
+        model, train_loader, val_loader, optimizer, criterion, epochs=epochs, device=device, scheduler=scheduler)
     torch.save(model.state_dict(), "transformer.pth")
     wandb.save("transformer.pth")
     print("Model saved as transformer.pth")
