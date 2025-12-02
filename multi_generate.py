@@ -83,7 +83,16 @@ def decode_tokens(tokens_4q, sound_stream, seed_full):
 
     # --- copy the true quantizers q4–q15 from seed_full ---
     seed_q = seed_full[:, 4:]                  # [T_seed, 12]
-    seed_q_expanded = seed_q[:T_new]                # crop to match length
+    T_seed = seed_q.shape[0]
+
+    if T_new <= T_seed:
+        seed_q_expanded = seed_q[:T_new]
+    else:
+        # repeat last fine-quantizer frame for continuation
+        extra = T_new - T_seed
+        last = seed_q[-1:].repeat(extra, 1)
+        seed_q_expanded = torch.cat([seed_q, last], dim=0)
+
     full_idx[:, :, 4:] = seed_q_expanded.unsqueeze(0)
 
     # --- manual decoding ---
@@ -113,7 +122,7 @@ if __name__ == "__main__":
     sound_stream.eval()
 
     # Load a random seed window from your 4-level dataset
-    dataset_folder = Path("2018_processed_four_levels")
+    dataset_folder = Path("2018_processed_all_levels")
     pt_files = list(dataset_folder.glob("*.pt"))
     selected_pt = random.choice(pt_files)
     pt_data = torch.load(selected_pt)
