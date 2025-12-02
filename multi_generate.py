@@ -69,25 +69,39 @@ def sample_sequence(model, seed_seq, max_new_tokens=500, temperature=1.0):
 # -----------------------------
 def decode_tokens(tokens_4q, sound_stream):
     """
-    tokens_4q: [T, 4]   integers for the first 4 quantizers
-    SoundStream expects 16 codebooks, so we zero-pad remaining 12.
+    tokens_4q: [T, 4]
+    Expands to 16 codebooks by zero-padding unused 12 quantizers.
     """
 
-    tokens_4q = tokens_4q.to(DEVICE)     # [T, 4]
+    tokens_4q = tokens_4q.to(DEVICE)
     T = tokens_4q.shape[0]
 
-    # Build full indices: [1, T, 16]
-    full_indices = torch.zeros(1, T, 16, dtype=torch.long, device=DEVICE)
-    full_indices[:, :, :4] = tokens_4q  # put ours in the first 4
+    # Build indices [1, T, 16]
+    full_idx = torch.zeros(1, T, 16, dtype=torch.long, device=DEVICE)
+    full_idx[:, :, :4] = tokens_4q
 
-    # Convert token indices → embeddings
-    quantized_embeddings, _, _ = sound_stream.quantizer.from_codes(full_indices)
-    # shape: [1, T, D]
+    # --- MANUAL DECODE (ResidualVQ does NOT have .from_codes) ---
+    # quantizer.num_quantizers = 16
+    # quantizer.codebook_size = 1024
+    # quantizer.layers[i].codebook → [1024, D]
 
-    # Decoder expects [batch, D, T]
-    decoded = sound_stream.decoder(quantized_embeddings.permute(0, 2, 1))
+    D = sound_stream.quantizer.dim
+    num_q = sound_stream.quantizer.num_quantizers
 
-    return decoded.squeeze(0).cpu()   # [audio_len]
+    # Pre-allocate quantized embeddings
+    quantized = torch.zeros(1, T, D, device=DEVICE)
+
+    residual = quantized.clone()
+
+    for q in range(num_q):
+        idx = full_idx[:, :, q]   # [1, T]
+        codebook = sound_stream.quantizer.layers[q].codebook  # [C, D]
+        level_vecs = codebook[idx]                           # [1, T, D]
+        residual = residual + level_vecs
+
+    # Decoder expects [B, D, T]
+    decoded = sound_stream.decoder(residual.permute(0, 2, 1))
+    return decoded.squeeze(0).cpu()
 
 
 # -----------------------------
