@@ -48,6 +48,7 @@ def preprocess_wavs(
         chunk_size = max(int(sr * chunk_duration), min_chunk_len)
 
         all_tokens = []  # will store [num_windows, T_down, X]
+        all_full_tokens = []  # will store full 16 quantizers
 
         print("  Encoding...")
 
@@ -64,19 +65,23 @@ def preprocess_wavs(
             chunk = chunk[:, :, :valid_len]
 
             with torch.no_grad():
-                indices = sound_stream(chunk, mode="encode")   # [1, T_down, 16]
-            print("  Encoded chunk shape (full):", indices.shape)
+                indices_full = sound_stream(chunk, mode="encode")   # [1, T_down, 16]
+            print("  Encoded chunk shape (full):", indices_full.shape)
+
+            full_indices = indices_full.clone()
 
             # Slice top X quantizers
-            indices = indices[:, :, :num_quantizers_to_use]    # [1, T_down, X]
+            indices = indices_full[:, :, :num_quantizers_to_use]    # [1, T_down, X]
             print("  Sliced chunk shape:", indices.shape)
             all_tokens.append(indices.cpu())
+            all_full_tokens.append(full_indices.cpu())
 
         if len(all_tokens) == 0:
             print("  No tokens extracted")
             continue
 
         tokens = torch.cat(all_tokens, dim=1).squeeze(0)  # [T_total, X]
+        full_tokens = torch.cat(all_full_tokens, dim=1).squeeze(0)  # [T_total, 16]
         print("  Tokens shape:", tokens.shape)
         total_frames = tokens.shape[0]
 
@@ -90,6 +95,7 @@ def preprocess_wavs(
         windows = []
         for start in range(0, total_frames - max_length - 1, step):
             window = tokens[start:start+max_length+1]     # [L+1, X]
+            window_full = full_tokens[start:start+max_length+1]  # [L+1, 16]
             # Multi-token autoregressive setup:
             # x = [L, X] input tokens for all quantizers
             # y = [L, X] next-timestep tokens for all quantizers
@@ -97,7 +103,8 @@ def preprocess_wavs(
             print("  x window shape:", x.shape)
             y = window[1:,  :num_quantizers_to_use].clone()   # [L, X]
             print("  y window shape:", y.shape)
-            windows.append({"x": x, "y": y})
+            full_16 = window_full[:-1, :].clone()  # [L, 16]
+            windows.append({"x": x, "y": y, "full_16": full_16})
 
         out_file = os.path.join(output_dir, f"{song_name}.pt")
         torch.save({"name": song_name, "windows": windows}, out_file)
@@ -113,7 +120,7 @@ if __name__ == "__main__":
 
     preprocess_wavs(
         input_dir="2018",
-        output_dir="2018_processed_four_levels",
+        output_dir="2018_processed_all_levels",
         max_length=2048,
         overlap=0.5,
         device="cuda",

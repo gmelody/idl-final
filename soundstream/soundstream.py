@@ -1,6 +1,6 @@
 from functools import reduce
 from typing import Literal
-
+import torch
 import torch.nn as nn
 from vector_quantize_pytorch import ResidualVQ
 
@@ -27,6 +27,26 @@ class SoundStream(nn.Module):
         )
         self.decoder = Decoder(C=C, D=D, strides=strides)
 
+    def decode_indices(self, indices):
+        """
+        indices: [B, T, Q] long tensors
+        Reconstruct quantized latents the same way ResidualVQ does in forward().
+        """
+
+        quantizers = self.quantizer.layers if hasattr(self.quantizer, "layers") else self.quantizer.quantizers
+        B, T, Q = indices.shape
+        D = quantizers[0].codebook.weight.shape[1]
+
+        latents = torch.zeros(B, T, D, device=indices.device)
+
+        for q in range(Q):
+            idx_q = indices[:, :, q]                      # [B, T]
+            codebook = quantizers[q].codebook.weight      # [num_codes, D]
+            embedded = codebook[idx_q]                    # [B, T, D]
+            latents += embedded                           # accumulate residuals
+
+        return latents
+
     def forward(
             self,
             x,
@@ -50,13 +70,6 @@ class SoundStream(nn.Module):
             return indicies
         
         if mode == 'decode':
-            # assume i am given indicies
-            quantized_latents = self.quantizer.get_codes_from_indices(x)
-            print(quantized_latents.shape)
-
-            full_latent = quantized_latents.sum(dim=0)  
-
-            print(full_latent.shape)
-            o = self.decoder(full_latent.permute((0,2,1)))
+            latents = self.decode_indices(x)             # [B, T, D]
+            o = self.decoder(latents.permute(0, 2, 1))   # [B, 1, T]
             return o
-        
