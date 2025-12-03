@@ -1,87 +1,68 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-class MultiQuantizerTransformer(nn.Module):
-    """
-    Transformer predicting per-quantizer discrete codes.
-    
-    Output shape: [batch, seq_len, num_quantizers, codebook_size]
-    """
-
+class ContinuousTransformer(nn.Module):
     def __init__(
         self,
-        num_quantizers = 4,
-        codebook_size = 1024,
-        embed_dim=512,
+        d_in=256,
+        d_model=512,
+        d_out=256,
         num_heads=8,
         num_layers=6,
         ff_dim=2048,
         dropout=0.1,
-        max_seq_len=2048
+        max_seq_len=512,
     ):
         super().__init__()
 
-        self.num_quantizers = num_quantizers
-        self.codebook_size = codebook_size
-        self.vocab_size = codebook_size      # per quantizer
-        self.embed_dim = embed_dim
+        self.d_in = d_in
+        self.d_model = d_model
+        self.d_out = d_out
         self.max_seq_len = max_seq_len
 
-        # We embed each quantizer token separately:
-        # input tokens will be shaped [B, T, Q]
-        self.token_emb = nn.Embedding(codebook_size, embed_dim)
-        self.pos_emb = nn.Embedding(max_seq_len, embed_dim)
+        # Project input embeddings into transformer space
+        self.input_proj = nn.Linear(d_in, d_model)
 
+        self.pos_emb = nn.Embedding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout)
 
-        self.quant_mixer = nn.Linear(num_quantizers * embed_dim, embed_dim)
-
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
+            d_model=d_model,
             nhead=num_heads,
             dim_feedforward=ff_dim,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.ln = nn.LayerNorm(d_model)
 
-        self.ln = nn.LayerNorm(embed_dim)
-
-        # Final head predicts num_quantizers × codebook_size logits
-        self.head = nn.Linear(embed_dim, num_quantizers * codebook_size)
+        # Project back to embedding space
+        self.output_proj = nn.Linear(d_model, d_out)
 
     def forward(self, x):
         """
-        x shape: [batch, seq_len, num_quantizers]
+        x: [B, T, D_in]
+        returns: [B, T, D_out]
         """
+        B, T, D = x.shape
+        assert D == self.d_in, f"Expected D={self.d_in}, got {D}"
+        assert T <= self.max_seq_len, f"T={T} > max_seq_len={self.max_seq_len}"
 
-        B, T, Q = x.shape
-        assert Q == self.num_quantizers
-
-        # Embed each quantizer token → [B, T, Q, E]
-        tok = self.token_emb(x)
-
-        # Flatten quantizer dimension → [B, T, Q*E]
-        tok = tok.reshape(B, T, Q * self.embed_dim)
-
-        # Project combined quantizer embeddings → [B, T, E]
-        x = self.quant_mixer(tok)
+        # Input projection
+        h = self.input_proj(x)    # [B, T, d_model]
 
         # Positional embeddings
         pos = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
-        x = x + self.pos_emb(pos)
-        x = self.dropout(x)
+        h = h + self.pos_emb(pos)
+        h = self.dropout(h)
 
         # Causal mask
         mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
 
-        # Transformer encoder
-        x = self.transformer(x, mask=mask)
-        x = self.ln(x)
+        # Transformer
+        h = self.transformer(h, mask=mask)
+        h = self.ln(h)
 
-        # Final prediction head
-        logits = self.head(x)
-        logits = logits.view(B, T, self.num_quantizers, self.codebook_size)
-
-        return logits
+        # Predict next-step embeddings
+        out = self.output_proj(h)   # [B, T, d_out]
+        return out

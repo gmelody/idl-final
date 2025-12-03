@@ -4,157 +4,199 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import soundfile as sf
-from multi_transformer import MultiQuantizerTransformer
-from torch.utils.data import random_split
 import wandb
+import torchaudio
+
+from multi_transformer import ContinuousTransformer
 
 torch.manual_seed(10617)
 
+# -----------------------------------------------------------
+# WANDB INIT
+# -----------------------------------------------------------
 wandb.init(
-    project="idl-final",         
-    name="final-4-quantizers", 
+    project="idl-final",
+    name="continuous-mse-mel",
     config={
         "learning_rate": 3e-4,
         "epochs": 25,
         "batch_size": 8,
-        "optimizer": "Adam",
-        "loss_fn": "CrossEntropy",
+        "loss_fn": "MSE + Mel",
         "scheduler": "OneCycleLR",
     }
 )
 
-# Dataloader
+# -----------------------------------------------------------
+# DATASET
+# -----------------------------------------------------------
 class PreprocessedTokenDataset(Dataset):
+    """
+    Returns:
+        x: [T, 256]  (embedding)
+        y: [T, 256]  (next-step embedding)
+    """
     def __init__(self, data_files):
-        self.data_files = data_files
         self.samples = []
+        for fp in data_files:
+            data = torch.load(fp)
+            for w in data["windows"]:
+                self.samples.append(w)
 
-        for file_path in self.data_files:
-            data = torch.load(file_path)
-            for window in data['windows']:
-                self.samples.append(window)
-
-        print(f"Loaded {len(self.samples)} windows from {len(self.data_files)} song files")
+        print(f"Loaded {len(self.samples)} windows from {len(data_files)} files.")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        x = sample['x']
-        y = sample['y']
+        x = self.samples[idx]["x"]   # [T, 256]
+        y = self.samples[idx]["y"]   # [T, 256]
         return x, y
 
 
-# Training and Validation Loop
-def train_on_dataset(model, train_loader, val_loader, optimizer, criterion, epochs, device="cpu", scheduler=None):
+# -----------------------------------------------------------
+# TRAINING LOOP
+# -----------------------------------------------------------
+def train_on_dataset(model, train_loader, val_loader, optimizer, epochs,
+                     device, scheduler=None):
 
-    train_losses = []
-    val_losses = []
+    mse = nn.MSELoss()
+
+    # Linear projection → pseudo-waveform for mel loss
+    embed_to_audio = nn.Linear(model.d_out, 1).to(device)
+
+    mel = torchaudio.transforms.MelSpectrogram(
+        sample_rate=24000,
+        n_fft=1024,
+        hop_length=256,
+        n_mels=80
+    ).to(device)
+
+    train_losses, val_losses = [], []
 
     try:
         for epoch in range(epochs):
+
+            # -------- TRAIN --------
             model.train()
             total_train_loss = 0
 
             for batch_idx, (x, y) in enumerate(train_loader):
-                x = x.long().to(device)
-                y = y.long().to(device)
+
+                x = x.float().to(device)
+                y = y.float().to(device)
 
                 optimizer.zero_grad()
-                logits = model(x)
 
-                B, T, Q, V = logits.shape
-                logits = logits.permute(0,1,3,2)
-                logits = logits.reshape(-1, V, Q)
-                y = y.reshape(-1, Q)
+                pred = model(x)       # [B, T, 256]
 
-                loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
+                # Only MSE + Mel loss
+                loss_total = 0.0
 
-                loss.backward()
+                # (1) MSE between embeddings
+                loss_total += mse(pred, y)
+
+                # (2) Mel Loss (pseudo audio)
+                audio_pred = embed_to_audio(pred).squeeze(-1)  # [B, T]
+                audio_true = embed_to_audio(y).squeeze(-1)
+
+                mel_pred = mel(audio_pred)
+                mel_true = mel(audio_true)
+
+                loss_total += mse(mel_pred, mel_true)
+
+                loss_total.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-                if scheduler is not None:
+                if scheduler:
                     scheduler.step()
 
-                total_train_loss += loss.item()
+                total_train_loss += loss_total.item()
 
                 if (batch_idx + 1) % 100 == 0:
-                    print(f"  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
+                    print(f"Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss_total.item():.4f}")
 
-            avg_train_loss = total_train_loss / len(train_loader)
-            train_losses.append(avg_train_loss)
+            avg_train = total_train_loss / len(train_loader)
+            train_losses.append(avg_train)
 
+            # -------- VAL --------
             model.eval()
             total_val_loss = 0
+
             with torch.no_grad():
                 for x, y in val_loader:
-                    x = x.long().to(device)
-                    y = y.long().to(device)
-                    logits = model(x)
 
-                    B, T, Q, V = logits.shape
-                    logits = logits.permute(0,1,3,2)
-                    logits = logits.reshape(-1, V, Q)
-                    y = y.reshape(-1, Q)
+                    x = x.float().to(device)
+                    y = y.float().to(device)
 
-                    loss = sum(criterion(logits[:,:,q], y[:,q]) for q in range(Q)) / Q
-                    total_val_loss += loss.item()
+                    pred = model(x)
 
-            avg_val_loss = total_val_loss / len(val_loader)
-            val_losses.append(avg_val_loss)
+                    loss_total = 0.0
 
-            print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+                    loss_total += mse(pred, y)
+
+                    audio_pred = embed_to_audio(pred).squeeze(-1)
+                    audio_true = embed_to_audio(y).squeeze(-1)
+
+                    mel_pred = mel(audio_pred)
+                    mel_true = mel(audio_true)
+
+                    loss_total += mse(mel_pred, mel_true)
+
+                    total_val_loss += loss_total.item()
+
+            avg_val = total_val_loss / len(val_loader)
+            val_losses.append(avg_val)
+
+            print(f"Epoch {epoch+1}/{epochs} | Train: {avg_train:.4f} | Val: {avg_val:.4f}")
 
             wandb.log({
-                "train_loss": avg_train_loss,
-                "val_loss": avg_val_loss,
+                "train_loss": avg_train,
+                "val_loss": avg_val,
                 "epoch": epoch+1
             })
 
         return train_losses, val_losses
 
     except KeyboardInterrupt:
-        print("Interrupted inside training loop — returning partial losses.")
+        print("Training interrupted — returning partial results.")
         return train_losses, val_losses
-    
 
 
-
+# -----------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Using device:", device)
+    print("Using:", device)
 
-    # Path to WAV
-    data_dir = "2018_processed_four_levels"  # Directory with .pt files
+    data_dir = "2018_processed_four_levels"
+    files = glob.glob(os.path.join(data_dir, "*.pt"))
+    n = len(files)
 
-    # Model setup
-    model = MultiQuantizerTransformer().to(device)
+    order = torch.randperm(n).tolist()
+    train_files = [files[i] for i in order[: int(0.8*n)]]
+    val_files   = [files[i] for i in order[int(0.8*n):]]
 
-    # Build dataset by songs instead of samples
-    data_files = glob.glob(os.path.join(data_dir, "*.pt"))
-    num_files = len(data_files)
+    train_set = PreprocessedTokenDataset(train_files)
+    val_set   = PreprocessedTokenDataset(val_files)
 
-    # Determine train-val file-level split
-    train_size = int(0.8 * num_files)
-    val_size = num_files - train_size
+    train_loader = DataLoader(train_set, batch_size=8, shuffle=True)
+    val_loader   = DataLoader(val_set, batch_size=8, shuffle=False)
 
-    # Shuffle and split file paths
-    file_paths = torch.randperm(num_files).tolist()
-    train_files = [data_files[i] for i in file_paths[:train_size]]
-    val_files = [data_files[i] for i in file_paths[train_size:]]
+    print(f"Training windows: {len(train_set)}")
+    print(f"Validation windows: {len(val_set)}")
 
-    # Create dataset instances
-    train_dataset = PreprocessedTokenDataset(train_files)
-    val_dataset = PreprocessedTokenDataset(val_files)
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
-    print(f"Loaded {len(train_dataset.samples)} windows for training from {len(train_files)} songs")
-    print(f"Loaded {len(val_dataset.samples)} windows for validation from {len(val_files)} songs")
+    model = ContinuousTransformer(
+        d_in=256,
+        d_model=512,
+        d_out=256,
+        num_heads=8,
+        num_layers=6,
+        ff_dim=2048,
+        max_seq_len=512
+    ).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
-    criterion = nn.CrossEntropyLoss().to(device)
 
     epochs = 25
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -165,28 +207,20 @@ if __name__ == "__main__":
         pct_start=0.1
     )
 
-    # Train Transformer
-    print("Training Transformer model on dataset")
-    train_losses = []
-    val_losses = []
-    try:
-        train_losses, val_losses = train_on_dataset(
-            model, train_loader, val_loader, optimizer, criterion, epochs=epochs, device=device, scheduler=scheduler
-        )
-    except KeyboardInterrupt:
-        print("Interrupted — saving partial model and losses...")
-        torch.save(model.state_dict(), "transformer_interrupt.pth")
-        wandb.save("transformer_interrupt.pth")
-        torch.save(train_losses, "train_losses_interrupt.pt")
-        torch.save(val_losses, "val_losses_interrupt.pt")
-        print("Saved interrupt checkpoint.")
-        raise
+    print("==== TRAINING START ====")
+    train_losses, val_losses = train_on_dataset(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        epochs=epochs,
+        device=device,
+        scheduler=scheduler
+    )
 
-    # Normal completion
     torch.save(model.state_dict(), "transformer.pth")
     wandb.save("transformer.pth")
-    print("Model saved as transformer.pth")
-
     torch.save(train_losses, "train_losses.pt")
     torch.save(val_losses, "val_losses.pt")
-    print("Losses saved in train_losses.pt and val_losses.pt")
+
+    print("Training complete — model saved.")
