@@ -48,6 +48,7 @@ def sample_sequence(model, seed_seq, max_new_tokens=500, temperature=1.0):
 
 def decode_tokens(tokens, sound_stream):
     with torch.no_grad():
+        print("TOKEN SHAPE: ", tokens.shape)
         tokens = tokens.to(DEVICE).unsqueeze(0)  # [1, T]
         quantizer = sound_stream.quantizer
 
@@ -58,7 +59,7 @@ def decode_tokens(tokens, sound_stream):
         embeddings_level_0 = quantizer.codebooks[0][tokens]  # [1, T, D]
 
         # Pad missing quantizers with zeros (assumes silent or 0-contribution)
-        embeddings = embeddings_level_0
+        # embeddings = embeddings_level_0
         for _ in range(1, num_quantizers):
             zero_embeddings = torch.zeros_like(embeddings_level_0)
             embeddings = embeddings + zero_embeddings  # Sum as residuals are additive
@@ -83,6 +84,7 @@ if __name__ == "__main__":
     seed_window = random.choice(pt_data['windows'])['x']
 
     print(f"Generating continuation from '{pt_data['name']}'")
+
 
     # Generate continuation
     full_sequence = sample_sequence(

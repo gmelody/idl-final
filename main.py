@@ -13,7 +13,7 @@ torch.manual_seed(10617)
 
 wandb.init(
     project="idl-final",         
-    name="baseline-soundstream", 
+    name="final-4-quantizers", 
     config={
         "learning_rate": 3e-4,
         "epochs": 20,
