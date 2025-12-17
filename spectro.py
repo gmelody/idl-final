@@ -3,7 +3,7 @@ import librosa.display
 import matplotlib.pyplot as plt
 import numpy as np
 
-audio, sr = librosa.load("generated_continuation.wav", sr=None)
+audio, sr = librosa.load("okay.wav", sr=None)
 mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=1024, hop_length=256, n_mels=128)
 mel_db = librosa.power_to_db(mel, ref=np.max)
 

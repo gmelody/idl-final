@@ -88,6 +88,10 @@ def preprocess_wavs(
             y = window[1:]     # [L, D] target (next-step embedding)
             windows.append({"x": x, "y": y})
 
+        MAX_WINDOWS = 300
+        if len(windows) > MAX_WINDOWS:
+            windows = windows[:MAX_WINDOWS]
+            
         save_path = os.path.join(output_dir, f"{song_name}.pt")
         torch.save({"name": song_name, "windows": windows}, save_path)
         print(f"  Saved {len(windows)} windows → {save_path}")
